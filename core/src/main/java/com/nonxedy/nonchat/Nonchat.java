@@ -289,8 +289,6 @@ public class Nonchat extends JavaPlugin {
         }
 
         try {
-            // Initialize DiscordSRV
-            new DiscordSRVHook(this);
             ChannelAPI.initialize(new ChannelAPI.ChannelAccess() {
                 @Override
                 public Collection<Channel> getAllChannels() {
@@ -307,6 +305,14 @@ public class Nonchat extends JavaPlugin {
                     return chatManager.getPlayerChannel(player);
                 }
             });
+            getLogger().info("ChannelAPI initialized");
+        } catch (Exception e) {
+            getLogger().log(Level.WARNING, "Failed to initialize ChannelAPI: {0}", e.getMessage());
+        }
+
+        try {
+            // Initialize DiscordSRV
+            new DiscordSRVHook(this);
 
             if (Bukkit.getPluginManager().getPlugin("DiscordSRV") != null) {
                 this.discordSRVIntegration = new DiscordSRVIntegration(this);
