@@ -22,6 +22,10 @@ import com.nonxedy.nonchat.config.PluginMessages;
 import com.nonxedy.nonchat.service.ChatService;
 import com.nonxedy.nonchat.service.ConfigService;
 import com.nonxedy.nonchat.util.chat.MentionCompletionUtil;
+import com.nonxedy.nonchat.util.chat.filters.AdDetector;
+import com.nonxedy.nonchat.util.chat.filters.CapsFilter;
+import com.nonxedy.nonchat.util.chat.filters.SpamDetector;
+import com.nonxedy.nonchat.util.chat.filters.WordBlocker;
 import com.nonxedy.nonchat.util.chat.formatting.PrivateMessageUtil;
 import com.nonxedy.nonchat.util.core.colors.ColorUtil;
 import com.nonxedy.nonchat.util.core.messages.MessageUtil;
@@ -42,6 +46,8 @@ public class MessageCommand implements CommandExecutor, TabCompleter {
     private final SpyCommand spyCommand;
     private final ChatService chatService;
     private IgnoreCommand ignoreCommand;
+    private final AdDetector adDetector;
+    private final SpamDetector spamDetector;
 
     // Constructor to initialize all required dependencies
     public MessageCommand(Nonchat plugin, PluginConfig config, PluginMessages messages, SpyCommand spyCommand) {
@@ -51,6 +57,8 @@ public class MessageCommand implements CommandExecutor, TabCompleter {
         this.spyCommand = spyCommand;
         this.chatService = null;
         this.ignoreCommand = plugin.getIgnoreCommand();
+        this.adDetector = new AdDetector(config, config.getAntiAdSensitivity(), config.getAntiAdPunishCommand());
+        this.spamDetector = new SpamDetector(config, messages);
     }
     
     // Alternative constructor for service-based architecture
@@ -61,6 +69,8 @@ public class MessageCommand implements CommandExecutor, TabCompleter {
         this.messages = configService.getMessages();
         this.spyCommand = null;
         this.ignoreCommand = null;
+        this.adDetector = new AdDetector(config, config.getAntiAdSensitivity(), config.getAntiAdPunishCommand());
+        this.spamDetector = new SpamDetector(config, messages);
     }
 
     public Map<UUID, UUID> getLastMessaged() {
@@ -237,6 +247,29 @@ public class MessageCommand implements CommandExecutor, TabCompleter {
      * @param message Message content
      */
     private void sendPrivateMessage(CommandSender sender, Player target, String message) {
+        // If MessageManager is available and sender is a player, delegate to it
+        // (it already contains full filtering logic)
+        if (plugin != null && sender instanceof Player playerSender) {
+            try {
+                if (plugin.getMessageManager() != null) {
+                    plugin.getMessageManager().sendPrivateMessage(playerSender, target, message);
+                    return;
+                }
+            } catch (Exception ignored) {
+                // Fall through to legacy handling if delegation fails
+            }
+        }
+
+        // Legacy path: apply filters directly (used when MessageManager not available or console sender)
+        if (sender instanceof Player player) {
+            if (!applyFilters(player, message)) {
+                if (plugin != null) {
+                    plugin.logChatMessage("Filtered PM (legacy): Player=" + player.getName() + " -> " + target.getName() + " Message=\"" + message + "\" Reason=filter_blocked");
+                }
+                return;
+            }
+        }
+
         // Check if sender has color permission and process message accordingly
         String processedMessage;
         if (sender instanceof Player player && !player.hasPermission("nonchat.color")) {
@@ -276,6 +309,54 @@ public class MessageCommand implements CommandExecutor, TabCompleter {
         if (plugin != null && sender instanceof Player player) {
             plugin.getMessageManager().updateReplyTargets(player, target);
         }
+    }
+
+    private boolean applyFilters(Player player, String message) {
+        // Check blocked words
+        if (handleBlockedWords(player, message)) {
+            return false;
+        }
+
+        // Check caps filter
+        CapsFilter capsFilter = config.getCapsFilter();
+        if (!player.hasPermission("nonchat.caps.bypass") && capsFilter.shouldFilter(message)) {
+            MessageUtil.send(player, ColorUtil.parseComponentCached(messages.getString("caps-filter")
+                    .replace("{percentage}", String.valueOf(capsFilter.getMaxCapsPercentage()))));
+            return false;
+        }
+
+        // Check spam
+        if (config.isAntiSpamEnabled() && !player.hasPermission("nonchat.spam.bypass")) {
+            if (spamDetector.shouldFilter(player, message)) {
+                return false;
+            }
+        }
+
+        // Check advertisements
+        if (config.isAntiAdEnabled() && !player.hasPermission("nonchat.ad.bypass")) {
+            if (adDetector.shouldFilter(player, message)) {
+                MessageUtil.send(player, ColorUtil.parseComponentCached(messages.getString("blocked-words")));
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private boolean handleBlockedWords(Player player, String message) {
+        if (!player.hasPermission("nonchat.antiblockedwords")) {
+            if (!config.isWordBlockingEnabled()) {
+                return false;
+            }
+
+            WordBlocker wordBlocker = config.getWordBlocker();
+            String messageToCheck = ColorUtil.stripAllColors(message);
+            if (!wordBlocker.isMessageAllowed(messageToCheck)) {
+                MessageUtil.send(player, ColorUtil.parseComponentCached(messages.getString("blocked-words")));
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

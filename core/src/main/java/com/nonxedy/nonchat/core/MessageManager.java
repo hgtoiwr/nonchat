@@ -12,6 +12,10 @@ import com.nonxedy.nonchat.command.impl.IgnoreCommand;
 import com.nonxedy.nonchat.command.impl.SpyCommand;
 import com.nonxedy.nonchat.config.PluginConfig;
 import com.nonxedy.nonchat.config.PluginMessages;
+import com.nonxedy.nonchat.util.chat.filters.AdDetector;
+import com.nonxedy.nonchat.util.chat.filters.CapsFilter;
+import com.nonxedy.nonchat.util.chat.filters.SpamDetector;
+import com.nonxedy.nonchat.util.chat.filters.WordBlocker;
 import com.nonxedy.nonchat.util.chat.formatting.PrivateMessageUtil;
 import com.nonxedy.nonchat.util.core.colors.ColorUtil;
 import com.nonxedy.nonchat.util.core.messages.MessageUtil;
@@ -26,12 +30,16 @@ public class MessageManager {
     private final SpyCommand spyCommand;
     private final Map<UUID, UUID> lastMessageSender = new ConcurrentHashMap<>();
     private volatile IgnoreCommand ignoreCommand;
+    private final AdDetector adDetector;
+    private final SpamDetector spamDetector;
 
     public MessageManager(Nonchat plugin, PluginConfig config, PluginMessages messages, SpyCommand spyCommand) {
         this.plugin = plugin;
         this.config = config;
         this.messages = messages;
         this.spyCommand = spyCommand;
+        this.adDetector = new AdDetector(config, config.getAntiAdSensitivity(), config.getAntiAdPunishCommand());
+        this.spamDetector = new SpamDetector(config, messages);
     }
 
     public Map<UUID, UUID> getLastMessageSender() {
@@ -92,6 +100,14 @@ public class MessageManager {
             return;
         }
 
+        // Apply anti-spam / anti-ad / caps / word filters (same as public chat)
+        if (!applyFilters(sender, message)) {
+            if (plugin != null) {
+                plugin.logChatMessage("Filtered PM: Player=" + sender.getName() + " -> " + receiver.getName() + " Message=\"" + message + "\" Reason=filter_blocked");
+            }
+            return;
+        }
+
         updateReplyTargets(sender, receiver);
 
         // Process message with color permission for sender
@@ -142,6 +158,58 @@ public class MessageManager {
 
     public void clearLastMessageSender(Player player) {
         lastMessageSender.remove(player.getUniqueId());
+    }
+
+    /**
+     * Applies all chat filters to a private message.
+     * Returns true if message is allowed, false if it should be blocked.
+     */
+    private boolean applyFilters(Player player, String message) {
+        // Check blocked words
+        if (handleBlockedWords(player, message)) {
+            return false;
+        }
+
+        // Check caps filter
+        CapsFilter capsFilter = config.getCapsFilter();
+        if (!player.hasPermission("nonchat.caps.bypass") && capsFilter.shouldFilter(message)) {
+            MessageUtil.send(player, ColorUtil.parseComponentCached(messages.getString("caps-filter")
+                    .replace("{percentage}", String.valueOf(capsFilter.getMaxCapsPercentage()))));
+            return false;
+        }
+
+        // Check spam
+        if (config.isAntiSpamEnabled() && !player.hasPermission("nonchat.spam.bypass")) {
+            if (spamDetector.shouldFilter(player, message)) {
+                return false;
+            }
+        }
+
+        // Check advertisements
+        if (config.isAntiAdEnabled() && !player.hasPermission("nonchat.ad.bypass")) {
+            if (adDetector.shouldFilter(player, message)) {
+                MessageUtil.send(player, ColorUtil.parseComponentCached(messages.getString("blocked-words")));
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private boolean handleBlockedWords(Player player, String message) {
+        if (!player.hasPermission("nonchat.antiblockedwords")) {
+            if (!config.isWordBlockingEnabled()) {
+                return false;
+            }
+
+            WordBlocker wordBlocker = config.getWordBlocker();
+            String messageToCheck = ColorUtil.stripAllColors(message);
+            if (!wordBlocker.isMessageAllowed(messageToCheck)) {
+                MessageUtil.send(player, ColorUtil.parseComponentCached(messages.getString("blocked-words")));
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
